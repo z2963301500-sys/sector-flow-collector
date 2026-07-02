@@ -82,10 +82,14 @@ jobs:
 
       - name: 提交数据
         run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add data/
-          git diff --staged --quiet || (git commit -m "data: 采集板块涨跌幅 $(TZ='Asia/Shanghai' date +%Y-%m-%d)" && git push)
+          if [ -d data ] && [ "$(ls -A data 2>/dev/null)" ]; then
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git add data/
+            git diff --staged --quiet || (git commit -m "data: 采集板块涨跌幅 $(TZ='Asia/Shanghai' date +%Y-%m-%d)" && git push)
+          else
+            echo "无数据，跳过提交"
+          fi
 
       - name: 上传制品(备份)
         uses: actions/upload-artifact@v6
