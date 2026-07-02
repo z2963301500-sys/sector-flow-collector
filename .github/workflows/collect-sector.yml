@@ -37,7 +37,7 @@ jobs:
               exit(0)
 
           t = now.time()
-          if not ((9,25) <= (t.hour, t.minute) <= (11,30) or (13,0) <= (t.hour, t.minute) <= (15,5)):
+          if False:
               print(f'[{ts}] Outside trading hours, skip')
               exit(0)
 
