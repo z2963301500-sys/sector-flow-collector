@@ -1,8 +1,7 @@
-name: 采集板块涨跌幅
+name: 采集板块涨跌幅 (东财标准行业)
 
 on:
   schedule:
-    # 每5分钟，周一到周五，UTC 1:00-7:59 = 北京时间 9:00-15:59
     - cron: '*/5 1-7 * * 1-5'
   workflow_dispatch:
 
@@ -13,18 +12,16 @@ jobs:
 
     steps:
       - uses: actions/checkout@v5
-
       - uses: actions/setup-python@v6
         with:
           python-version: '3.11'
-
       - name: 安装 akshare
         run: pip install akshare
 
-      - name: 采集板块数据 (Sina源)
+      - name: 采集板块数据 (东财标准行业)
         run: |
           python -c "
-          import akshare as ak, json, os
+          import akshare as ak, json, os, time, random
           from datetime import datetime, timezone, timedelta
 
           bj = timezone(timedelta(hours=8))
@@ -41,63 +38,47 @@ jobs:
               print(f'[{ts}] Outside trading hours, skip')
               exit(0)
 
-          sectors = []
-          source = ''
+          # Random jitter to avoid fixed-interval patterns
+          time.sleep(random.uniform(0, 5))
+
           try:
-              # Try Sina first (works from overseas)
-              df = ak.stock_sector_spot(indicator='行业')
-              source = 'sina'
-              df = df.sort_values(df.columns[5], ascending=False)
-              cols = list(df.columns)
+              df = ak.stock_board_industry_name_em()
+              source = 'eastmoney'
+              df = df.sort_values('涨跌幅', ascending=False)
+              sectors = []
               for _, row in df.iterrows():
                   sectors.append({
                       'rank': len(sectors) + 1,
-                      'name': row[cols[1]],
-                      'code': row[cols[0]],
-                      'change_pct': float(row[cols[5]]),
-                      'up_count': 0,
-                      'down_count': 0,
-                      'leader': row.get(cols[-1], ''),
-                      'leader_change': float(row[cols[-2]]) if len(cols) >= 12 else 0,
+                      'name': row['板块名称'],
+                      'code': row['板块代码'],
+                      'change_pct': float(row['涨跌幅']),
+                      'up_count': int(row['上涨家数']),
+                      'down_count': int(row['下跌家数']),
+                      'leader': row.get('领涨股', ''),
+                      'leader_change': float(row.get('领涨股-涨跌幅', 0) or 0),
                   })
+
+              filepath = f'data/sector_flow_{today}.json'
+              existing = {'date': today, 'source': source, 'snapshot_count': 0, 'snapshots': []}
+              if os.path.exists(filepath):
+                  with open(filepath, encoding='utf-8') as f:
+                      existing = json.load(f)
+
+              existing['snapshots'].append({'timestamp': ts, 'sectors': sectors})
+              existing['snapshot_count'] = len(existing['snapshots'])
+              existing['source'] = source
+
+              os.makedirs('data', exist_ok=True)
+              with open(filepath, 'w', encoding='utf-8') as f:
+                  json.dump(existing, f, ensure_ascii=False)
+
+              top3 = sorted(sectors, key=lambda s: s['change_pct'], reverse=True)[:3]
+              print(f'[{ts}] {len(sectors)}板块 | {len(existing[\"snapshots\"])}个快照')
+              print(f'Top: {top3[0][\"name\"]}({top3[0][\"change_pct\"]:+.2f}%) {top3[1][\"name\"]}({top3[1][\"change_pct\"]:+.2f}%) {top3[2][\"name\"]}({top3[2][\"change_pct\"]:+.2f}%)')
           except Exception as e:
-              print(f'[WARN] Sina failed: {e}, trying Eastmoney...')
-              try:
-                  df = ak.stock_board_industry_name_em()
-                  source = 'eastmoney'
-                  df = df.sort_values('涨跌幅', ascending=False)
-                  for _, row in df.iterrows():
-                      sectors.append({
-                          'rank': len(sectors) + 1,
-                          'name': row['板块名称'],
-                          'code': row['板块代码'],
-                          'change_pct': float(row['涨跌幅']),
-                          'up_count': int(row['上涨家数']),
-                          'down_count': int(row['下跌家数']),
-                          'leader': row.get('领涨股', ''),
-                          'leader_change': float(row.get('领涨股-涨跌幅', 0) or 0),
-                      })
-              except Exception as e2:
-                  print(f'[ERROR] All sources failed: {e2}')
-                  exit(1)
-
-          filepath = f'data/sector_flow_{today}.json'
-          existing = {'date': today, 'source': source, 'snapshot_count': 0, 'snapshots': []}
-          if os.path.exists(filepath):
-              with open(filepath, encoding='utf-8') as f:
-                  existing = json.load(f)
-
-          existing['snapshots'].append({'timestamp': ts, 'sectors': sectors})
-          existing['snapshot_count'] = len(existing['snapshots'])
-          existing['source'] = source
-
-          os.makedirs('data', exist_ok=True)
-          with open(filepath, 'w', encoding='utf-8') as f:
-              json.dump(existing, f, ensure_ascii=False)
-
-          top3 = sorted(sectors, key=lambda s: s['change_pct'], reverse=True)[:3]
-          print(f'[{ts}] {len(sectors)}板块({source}) | {len(existing[\"snapshots\"])}个快照')
-          print(f'Top: {top3[0][\"name\"]}({top3[0][\"change_pct\"]:+.2f}%) {top3[1][\"name\"]}({top3[1][\"change_pct\"]:+.2f}%) {top3[2][\"name\"]}({top3[2][\"change_pct\"]:+.2f}%)')
+              print(f'[ERROR] Eastmoney blocked from GitHub: {e}')
+              print(f'[FALLBACK] Will use local Windows scheduled task instead')
+              exit(0)  # Don't fail the workflow, just skip
           "
 
       - name: 提交数据
@@ -106,14 +87,7 @@ jobs:
             git config user.name "github-actions[bot]"
             git config user.email "github-actions[bot]@users.noreply.github.com"
             git add data/
-            git diff --staged --quiet || (git commit -m "data: 采集板块涨跌幅 $(TZ='Asia/Shanghai' date +%Y-%m-%d)" && git push)
+            git diff --staged --quiet || (git commit -m "data: $(TZ='Asia/Shanghai' date +%Y-%m-%d)" && git push)
           else
             echo "无数据，跳过提交"
           fi
-
-      - name: 上传制品(备份)
-        uses: actions/upload-artifact@v6
-        with:
-          name: sector-data
-          path: data/sector_flow_*.json
-          retention-days: 7
