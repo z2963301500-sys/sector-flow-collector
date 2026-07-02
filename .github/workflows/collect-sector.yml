@@ -21,7 +21,7 @@ jobs:
       - name: 安装 akshare
         run: pip install akshare
 
-      - name: 采集板块数据
+      - name: 采集板块数据 (Sina源)
         run: |
           python -c "
           import akshare as ak, json, os
@@ -32,52 +32,72 @@ jobs:
           today = now.strftime('%Y-%m-%d')
           ts = now.strftime('%H:%M')
 
-          # Skip weekends
           if now.weekday() >= 5:
               print(f'[{ts}] Weekend, skip')
               exit(0)
 
-          # Skip outside trading hours with buffer
           t = now.time()
-          if False and not ((9,25) <= (t.hour, t.minute) <= (11,30) or (13,0) <= (t.hour, t.minute) <= (15,5)):
+          if not ((9,25) <= (t.hour, t.minute) <= (11,30) or (13,0) <= (t.hour, t.minute) <= (15,5)):
               print(f'[{ts}] Outside trading hours, skip')
               exit(0)
 
+          sectors = []
+          source = ''
           try:
-              df = ak.stock_board_industry_name_em()
-              df = df.sort_values('涨跌幅', ascending=False)
-              sectors = []
+              # Try Sina first (works from overseas)
+              df = ak.stock_sector_spot(indicator='行业')
+              source = 'sina'
+              df = df.sort_values(df.columns[5], ascending=False)
+              cols = list(df.columns)
               for _, row in df.iterrows():
                   sectors.append({
                       'rank': len(sectors) + 1,
-                      'name': row['板块名称'],
-                      'code': row['板块代码'],
-                      'change_pct': float(row['涨跌幅']),
-                      'up_count': int(row['上涨家数']),
-                      'down_count': int(row['下跌家数']),
-                      'leader': row.get('领涨股', ''),
-                      'leader_change': float(row.get('领涨股-涨跌幅', 0) or 0),
+                      'name': row[cols[1]],
+                      'code': row[cols[0]],
+                      'change_pct': float(row[cols[5]]),
+                      'up_count': 0,
+                      'down_count': 0,
+                      'leader': row.get(cols[-1], ''),
+                      'leader_change': float(row[cols[-2]]) if len(cols) >= 12 else 0,
                   })
-
-              filepath = f'data/sector_flow_{today}.json'
-              existing = {'date': today, 'source': 'akshare', 'snapshot_count': 0, 'snapshots': []}
-              if os.path.exists(filepath):
-                  with open(filepath, encoding='utf-8') as f:
-                      existing = json.load(f)
-
-              existing['snapshots'].append({'timestamp': ts, 'sectors': sectors})
-              existing['snapshot_count'] = len(existing['snapshots'])
-
-              os.makedirs('data', exist_ok=True)
-              with open(filepath, 'w', encoding='utf-8') as f:
-                  json.dump(existing, f, ensure_ascii=False)
-
-              top3 = sorted(sectors, key=lambda s: s['change_pct'], reverse=True)[:3]
-              print(f'[{ts}] {len(sectors)}板块 | {len(existing[\"snapshots\"])}个快照')
-              print(f'Top: {top3[0][\"name\"]}({top3[0][\"change_pct\"]:+.2f}%) {top3[1][\"name\"]}({top3[1][\"change_pct\"]:+.2f}%) {top3[2][\"name\"]}({top3[2][\"change_pct\"]:+.2f}%)')
           except Exception as e:
-              print(f'[ERROR] {e}')
-              exit(1)
+              print(f'[WARN] Sina failed: {e}, trying Eastmoney...')
+              try:
+                  df = ak.stock_board_industry_name_em()
+                  source = 'eastmoney'
+                  df = df.sort_values('涨跌幅', ascending=False)
+                  for _, row in df.iterrows():
+                      sectors.append({
+                          'rank': len(sectors) + 1,
+                          'name': row['板块名称'],
+                          'code': row['板块代码'],
+                          'change_pct': float(row['涨跌幅']),
+                          'up_count': int(row['上涨家数']),
+                          'down_count': int(row['下跌家数']),
+                          'leader': row.get('领涨股', ''),
+                          'leader_change': float(row.get('领涨股-涨跌幅', 0) or 0),
+                      })
+              except Exception as e2:
+                  print(f'[ERROR] All sources failed: {e2}')
+                  exit(1)
+
+          filepath = f'data/sector_flow_{today}.json'
+          existing = {'date': today, 'source': source, 'snapshot_count': 0, 'snapshots': []}
+          if os.path.exists(filepath):
+              with open(filepath, encoding='utf-8') as f:
+                  existing = json.load(f)
+
+          existing['snapshots'].append({'timestamp': ts, 'sectors': sectors})
+          existing['snapshot_count'] = len(existing['snapshots'])
+          existing['source'] = source
+
+          os.makedirs('data', exist_ok=True)
+          with open(filepath, 'w', encoding='utf-8') as f:
+              json.dump(existing, f, ensure_ascii=False)
+
+          top3 = sorted(sectors, key=lambda s: s['change_pct'], reverse=True)[:3]
+          print(f'[{ts}] {len(sectors)}板块({source}) | {len(existing[\"snapshots\"])}个快照')
+          print(f'Top: {top3[0][\"name\"]}({top3[0][\"change_pct\"]:+.2f}%) {top3[1][\"name\"]}({top3[1][\"change_pct\"]:+.2f}%) {top3[2][\"name\"]}({top3[2][\"change_pct\"]:+.2f}%)')
           "
 
       - name: 提交数据
