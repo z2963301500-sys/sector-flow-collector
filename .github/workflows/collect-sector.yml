@@ -1,4 +1,4 @@
-name: 采集板块涨跌幅 (同花顺标准行业)
+name: 采集板块资金流向 (东财概念+行业)
 
 on:
   schedule:
@@ -15,13 +15,11 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: '3.11'
-      - name: 安装 akshare
-        run: pip install akshare
 
-      - name: 采集板块数据 (同花顺)
+      - name: 采集板块数据
         run: |
           python -c "
-          import akshare as ak, json, os, time, random
+          import requests, json, os, time, random
           from datetime import datetime, timezone, timedelta
 
           bj = timezone(timedelta(hours=8))
@@ -34,45 +32,62 @@ jobs:
               exit(0)
           t = now.time()
           if not ((9,25) <= (t.hour, t.minute) <= (11,30) or (13,0) <= (t.hour, t.minute) <= (15,5)):
-              print(f'[{ts}] Out of hours skip')
+              print(f'[{ts}] Out of trading hours, skip')
               exit(0)
 
           time.sleep(random.uniform(0, 5))
 
-          try:
-              df = ak.stock_board_industry_summary_ths()
-              cols = list(df.columns)
-              sectors = []
-              for _, row in df.iterrows():
-                  sectors.append({
-                      'rank': int(row[cols[0]]),
-                      'name': row[cols[1]],
-                      'change_pct': float(row[cols[2]]),
-                      'up_count': int(row[cols[5]]),
-                      'down_count': int(row[cols[7]]),
-                      'leader': row[cols[9]],
-                      'leader_change': float(row[cols[11]]) if row[cols[11]] != '-' else 0,
-                  })
+          url = 'https://emdatah5.eastmoney.com/dc/ZJLX/getZDYLBData'
+          ut = 'b2884a393a59ad64002292a3e90d46a5'
+          sectors = []
 
-              filepath = f'data/sector_flow_{today}.json'
-              existing = {'date': today, 'source': 'ths', 'snapshot_count': 0, 'snapshots': []}
-              if os.path.exists(filepath):
-                  with open(filepath, encoding='utf-8') as f:
-                      existing = json.load(f)
+          # Fetch both concept (t:3) and industry (t:2)
+          for board_type, fs_val in [('concept', 'm:90+t:3'), ('industry', 'm:90+t:2')]:
+              try:
+                  r = requests.get(url, params={
+                      'fields': 'f2,f3,f12,f14,f62',
+                      'pn': '1', 'pz': '200',
+                      'fid': 'f62', 'po': '1',
+                      'fs': fs_val, 'ut': ut,
+                  }, timeout=15)
+                  for it in r.json().get('data', {}).get('diff', []):
+                      sectors.append({
+                          'name': it.get('f14', ''),
+                          'code': it.get('f12', ''),
+                          'change_pct': it.get('f3', 0),
+                          'main_net': float(it.get('f62', 0)),
+                          'type': board_type,
+                      })
+              except Exception as e:
+                  print(f'[WARN] {board_type} fetch failed: {e}')
 
-              existing['snapshots'].append({'timestamp': ts, 'sectors': sectors})
-              existing['snapshot_count'] = len(existing['snapshots'])
+          # Deduplicate by code
+          seen = set()
+          unique = [s for s in sectors if s['code'] not in seen and not seen.add(s['code'])]
 
-              os.makedirs('data', exist_ok=True)
-              with open(filepath, 'w', encoding='utf-8') as f:
-                  json.dump(existing, f, ensure_ascii=False)
+          # Sort and add rank
+          unique.sort(key=lambda x: x['main_net'], reverse=True)
+          for i, s in enumerate(unique):
+              s['rank'] = i + 1
 
-              sorted_s = sorted(sectors, key=lambda s: s['change_pct'], reverse=True)
-              print(f'[{ts}] {len(sectors)} sectors | {existing[\"snapshot_count\"]} snaps')
-              print(f'Top: {sorted_s[0][\"name\"]}({sorted_s[0][\"change_pct\"]:+.2f}%) {sorted_s[1][\"name\"]}({sorted_s[1][\"change_pct\"]:+.2f}%) {sorted_s[2][\"name\"]}({sorted_s[2][\"change_pct\"]:+.2f}%)')
-          except Exception as e:
-              print(f'[ERROR] {e}')
-              exit(0)
+          filepath = f'data/sector_flow_{today}.json'
+          existing = {'date': today, 'source': 'emdatah5.eastmoney.com', 'snapshot_count': 0, 'snapshots': []}
+          if os.path.exists(filepath):
+              with open(filepath, encoding='utf-8') as f:
+                  existing = json.load(f)
+
+          existing['snapshots'].append({'timestamp': ts, 'sectors': unique})
+          existing['snapshot_count'] = len(existing['snapshots'])
+
+          os.makedirs('data', exist_ok=True)
+          with open(filepath, 'w', encoding='utf-8') as f:
+              json.dump(existing, f, ensure_ascii=False)
+
+          pos = sum(1 for s in unique if s['main_net'] > 0)
+          neg = sum(1 for s in unique if s['main_net'] < 0)
+          top3 = unique[:3]
+          print(f'[{ts}] {len(unique)}板块 (+{pos}/-{neg})')
+          print(f'Top: {top3[0][\"name\"]}({top3[0][\"main_net\"]/1e8:+.1f}亿) {top3[1][\"name\"]}({top3[1][\"main_net\"]/1e8:+.1f}亿) {top3[2][\"name\"]}({top3[2][\"main_net\"]/1e8:+.1f}亿)')
           "
 
       - name: 提交数据
